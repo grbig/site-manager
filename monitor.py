@@ -252,7 +252,6 @@ async def tail_log(
     detector: "BotDetector",
 ) -> None:
     """Tail the nginx access log file in real-time, handling log rotation."""
-    # Wait until file exists
     while not os.path.exists(log_file):
         await asyncio.sleep(2.0)
 
@@ -264,9 +263,12 @@ async def tail_log(
         while True:
             line = fd.readline()
             if line:
-                entry = parse_line(line)
-                if entry:
-                    await upsert_record(entry, state, geo, detector)
+                try:
+                    entry = parse_line(line)
+                    if entry:
+                        await upsert_record(entry, state, geo, detector)
+                except Exception:
+                    pass  # Skip bad lines, keep tailing
             else:
                 await asyncio.sleep(0.1)
                 # Check for log rotation
@@ -295,21 +297,31 @@ async def replay_log(
         return
 
     try:
-        # Read last N lines efficiently
         with open(log_file, "rb") as f:
             f.seek(0, 2)
             file_size = f.tell()
-            # Read up to 200KB from the end
-            read_size = min(file_size, 200 * 1024)
+            # Read enough bytes to get `lines` entries (avg ~600 bytes per JSON line)
+            read_size = min(file_size, lines * 800)
             f.seek(file_size - read_size)
             raw = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return
 
-        all_lines = raw.splitlines()[-lines:]
-        for line in all_lines:
+    all_lines = raw.splitlines()
+    # Skip the first line (likely partial) unless we read from the beginning
+    if read_size < file_size:
+        all_lines = all_lines[1:]
+    all_lines = all_lines[-lines:]
+
+    batch = 0
+    for line in all_lines:
+        try:
             entry = parse_line(line)
             if entry:
                 await upsert_record(entry, state, geo, detector)
-                # Yield control periodically
-                await asyncio.sleep(0)
-    except Exception:
-        pass
+                batch += 1
+                # Yield every 20 entries to keep TUI responsive
+                if batch % 20 == 0:
+                    await asyncio.sleep(0)
+        except Exception:
+            pass  # Skip bad lines, continue loading

@@ -6,6 +6,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from rich.markup import escape as markup_escape
+
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -54,21 +56,23 @@ class DetailPanel(Static):
             return
 
         rate = record.requests_per_minute()
-        bot_text = f"Sim — {record.bot_reason}" if record.is_bot else "Não"
+        bot_text = f"Sim — {markup_escape(record.bot_reason)}" if record.is_bot else "Não"
         blocked_text = "[red]Sim[/]" if record.is_blocked else "Não"
-        uas = list(record.user_agents)[:3]
-        ua_lines = ("\n" + " " * 15).join(uas) if uas else "(nenhum)"
+        uas = [markup_escape(ua) for ua in list(record.user_agents)[:3]]
+        ua_lines = ("\n" + " " * 16).join(uas) if uas else "(nenhum)"
         first_seen = record.first_seen.strftime("%d/%m %H:%M:%S") if record.first_seen else "-"
         last_seen = record.last_seen.strftime("%d/%m %H:%M:%S") if record.last_seen else "-"
+        safe_path = markup_escape(record.last_path or "-")
+        safe_country = markup_escape(record.country_name or "...")
 
         text = (
             f"[bold cyan]── {record.ip} ──[/]\n"
-            f"  País        : {record.flag_emoji} {record.country_name} ({record.country_code})\n"
+            f"  País        : {record.flag_emoji} {safe_country} ({record.country_code})\n"
             f"  Bot         : {bot_text}\n"
             f"  Bloqueado   : {blocked_text}\n"
             f"  Requisições : {record.request_count} total, {rate}/min\n"
             f"  Primeiro    : {first_seen}  Último: {last_seen}\n"
-            f"  Último Req  : {record.last_method} {record.last_path} → {record.last_status}\n"
+            f"  Último Req  : {record.last_method} {safe_path} → {record.last_status}\n"
             f"  User Agents : {ua_lines}"
         )
         content.update(text)
@@ -174,6 +178,26 @@ class SiteManagerApp(App):
         self._update_detail()
         self._update_status(records)
 
+    def _make_row(self, ip: str, r: "IPRecord") -> tuple:
+        rate = r.requests_per_minute()
+        last_seen = r.last_seen.strftime("%H:%M:%S") if r.last_seen else "-"
+        bot_mark = "Y" if r.is_bot else " "
+        blk_mark = "Y" if r.is_blocked else " "
+        path = (r.last_path[:33] + "…") if r.last_path and len(r.last_path) > 34 else (r.last_path or "-")
+        country = r.country_name[:16] if r.country_name else "..."
+        return (
+            r.flag_emoji,
+            ip,
+            country,
+            str(r.request_count),
+            str(rate),
+            last_seen,
+            bot_mark,
+            blk_mark,
+            str(r.last_status) if r.last_status else "-",
+            path,
+        )
+
     def _update_table(self, records: dict[str, "IPRecord"]) -> None:
         table = self.query_one("#ip-table", DataTable)
 
@@ -187,60 +211,36 @@ class SiteManagerApp(App):
             ),
         )
 
-        # Add or update rows
-        new_row_keys: dict[str, str] = {}
+        current_ips = set(self._row_keys.keys())
+        new_ips = set(sorted_ips)
+
+        # Add new rows
         for ip in sorted_ips:
-            r = records[ip]
-            rate = r.requests_per_minute()
-            last_seen = r.last_seen.strftime("%H:%M:%S") if r.last_seen else "-"
-            bot_mark = "🤖" if r.is_bot else "  "
-            blk_mark = "🚫" if r.is_blocked else "  "
-            path = (r.last_path[:33] + "…") if len(r.last_path) > 34 else r.last_path
-
-            row_data = (
-                r.flag_emoji,
-                ip,
-                r.country_name[:16] if r.country_name else "...",
-                str(r.request_count),
-                str(rate),
-                last_seen,
-                bot_mark,
-                blk_mark,
-                str(r.last_status) if r.last_status else "-",
-                path,
-            )
-
-            if ip in self._row_keys:
-                # Update existing row cells
-                rk = self._row_keys[ip]
+            if ip not in current_ips:
+                row_data = self._make_row(ip, records[ip])
                 try:
-                    col_keys = [col.key for col in table.columns.values()]
-                    for col_key, value in zip(col_keys, row_data):
-                        table.update_cell(rk, col_key, value, update_width=False)
-                    new_row_keys[ip] = rk
-                except Exception:
-                    # Row may have been removed; re-add
-                    try:
-                        rk = table.add_row(*row_data, key=ip)
-                        new_row_keys[ip] = rk
-                    except Exception:
-                        pass
-            else:
-                try:
-                    rk = table.add_row(*row_data, key=ip)
-                    new_row_keys[ip] = rk
+                    self._row_keys[ip] = table.add_row(*row_data, key=ip)
                 except Exception:
                     pass
 
-        # Remove stale rows
-        stale = set(self._row_keys.keys()) - set(sorted_ips)
-        for ip in stale:
+        # Remove stale rows (IPs no longer in records)
+        for ip in current_ips - new_ips:
             try:
-                table.remove_row(self._row_keys[ip])
+                table.remove_row(self._row_keys.pop(ip))
             except Exception:
-                pass
+                self._row_keys.pop(ip, None)
 
-        self._row_keys = new_row_keys
+        # Update cells for existing rows
+        col_keys = [col.key for col in table.columns.values()]
+        for ip in sorted_ips:
+            if ip in current_ips and ip in self._row_keys:
+                row_data = self._make_row(ip, records[ip])
+                rk = self._row_keys[ip]
+                for col_key, value in zip(col_keys, row_data):
+                    try:
+                        table.update_cell(rk, col_key, value, update_width=False)
+                    except Exception:
+                        pass
 
     def _update_detail(self) -> None:
         panel = self.query_one("#detail-panel", DetailPanel)

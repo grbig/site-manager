@@ -63,24 +63,19 @@ class RateLimiter:
         self._lock = asyncio.Lock()
 
     async def acquire(self) -> None:
-        async with self._lock:
-            now = time.monotonic()
-            cutoff = now - self._period
-            # Prune old timestamps
-            while self._timestamps and self._timestamps[0] < cutoff:
-                self._timestamps.popleft()
-
-            if len(self._timestamps) >= self._max_calls:
-                # Wait until the oldest entry falls outside the window
-                wait_time = self._period - (now - self._timestamps[0]) + 0.05
-                await asyncio.sleep(wait_time)
-                # Prune again after waiting
+        while True:
+            async with self._lock:
                 now = time.monotonic()
                 cutoff = now - self._period
                 while self._timestamps and self._timestamps[0] < cutoff:
                     self._timestamps.popleft()
-
-            self._timestamps.append(time.monotonic())
+                if len(self._timestamps) < self._max_calls:
+                    self._timestamps.append(time.monotonic())
+                    return
+                # Calculate how long to wait BEFORE re-checking
+                wait_time = self._period - (now - self._timestamps[0]) + 0.05
+            # Sleep OUTSIDE the lock so other tasks can proceed
+            await asyncio.sleep(wait_time)
 
 
 class GeoResolver:
