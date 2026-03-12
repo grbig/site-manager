@@ -137,13 +137,17 @@ class SiteManagerApp(App):
         Binding("q", "quit", "Sair"),
         Binding("b", "block_ip", "Bloquear"),
         Binding("u", "unblock_ip", "Liberar"),
+        Binding("U", "unblock_all", "Liberar Todos"),
         Binding("f", "toggle_bots", "Só Bots"),
+        Binding("e", "toggle_blocked", "Só Bloqueados"),
+        Binding("a", "show_all", "Mostrar Todos"),
         Binding("c", "clear_ip", "Remover"),
         Binding("r", "refresh_geo", "Re-GeoIP"),
         Binding("?", "show_help", "Ajuda"),
     ]
 
     show_bots_only: reactive[bool] = reactive(False)
+    show_blocked_only: reactive[bool] = reactive(False)
 
     def __init__(
         self,
@@ -184,6 +188,8 @@ class SiteManagerApp(App):
 
         if self.show_bots_only:
             records = {ip: r for ip, r in records.items() if r.is_bot}
+        elif self.show_blocked_only:
+            records = {ip: r for ip, r in records.items() if r.is_blocked}
 
         self._update_table(records)
         self._update_detail()
@@ -191,21 +197,23 @@ class SiteManagerApp(App):
 
     def _make_row(self, ip: str, r: "IPRecord") -> tuple:
         rate = r.requests_per_minute()
-        last_seen = r.last_seen.strftime("%H:%M:%S") if r.last_seen else "-"
+        # For stub records (blocked but never seen in log), show placeholder
+        has_data = r.request_count > 0
+        last_seen = r.last_seen.strftime("%H:%M:%S") if has_data else "—"
         bot_mark = "Y" if r.is_bot else " "
         blk_mark = "Y" if r.is_blocked else " "
-        path = (r.last_path[:33] + "…") if r.last_path and len(r.last_path) > 34 else (r.last_path or "-")
+        path = (r.last_path[:33] + "…") if r.last_path and len(r.last_path) > 34 else (r.last_path or "—")
         country = r.country_name[:16] if r.country_name else "..."
         return (
             r.flag_emoji,
             ip,
             country,
-            str(r.request_count),
-            str(rate),
+            str(r.request_count) if has_data else "—",
+            str(rate) if has_data else "—",
             last_seen,
             bot_mark,
             blk_mark,
-            str(r.last_status) if r.last_status else "-",
+            str(r.last_status) if r.last_status else "—",
             path,
         )
 
@@ -261,13 +269,20 @@ class SiteManagerApp(App):
             panel.update_record(None)
 
     def _update_status(self, records: dict) -> None:
-        total_reqs = sum(r.request_count for r in records.values())
-        bots = sum(1 for r in records.values() if r.is_bot)
-        blocked = sum(1 for r in records.values() if r.is_blocked)
+        all_records = self._state.ip_records
+        total_ips = len(all_records)
+        total_reqs = sum(r.request_count for r in all_records.values())
+        bots = sum(1 for r in all_records.values() if r.is_bot)
+        total_blocked = len(self._state.blocked_ips)
         label = self.query_one("#status-bar", Label)
-        mode = " [APENAS BOTS]" if self.show_bots_only else ""
+        if self.show_blocked_only:
+            mode = f" [BLOQUEADOS: {len(records)} de {total_blocked}]"
+        elif self.show_bots_only:
+            mode = f" [BOTS: {len(records)}]"
+        else:
+            mode = ""
         label.update(
-            f"IPs: {len(records)} | Reqs: {total_reqs} | Bots: {bots} | Bloqueados: {blocked}{mode}"
+            f"IPs: {total_ips} | Reqs: {total_reqs} | Bots: {bots} | Bloqueados: {total_blocked}{mode}"
         )
 
     # ------------------------------------------------------------------ #
@@ -317,8 +332,45 @@ class SiteManagerApp(App):
 
     def action_toggle_bots(self) -> None:
         self.show_bots_only = not self.show_bots_only
+        self.show_blocked_only = False
         mode = "LIGADO" if self.show_bots_only else "DESLIGADO"
         self.notify(f"Filtro bots: {mode}")
+
+    def action_toggle_blocked(self) -> None:
+        self.show_blocked_only = not self.show_blocked_only
+        self.show_bots_only = False
+        if self.show_blocked_only:
+            n = len(self._state.blocked_ips)
+            self.notify(f"Mostrando {n} IP(s) bloqueado(s). Pressione 'u' para liberar, 'U' para liberar todos.")
+        else:
+            self.notify("Mostrando todos os IPs")
+
+    def action_show_all(self) -> None:
+        self.show_blocked_only = False
+        self.show_bots_only = False
+        self.notify("Mostrando todos os IPs")
+
+    async def action_unblock_all(self) -> None:
+        blocked = list(self._state.blocked_ips)
+        if not blocked:
+            self.notify("Nenhum IP bloqueado", severity="warning")
+            return
+        self.notify(f"Liberando {len(blocked)} IP(s)...", severity="warning")
+        ok, fail = 0, 0
+        for ip in blocked:
+            result = await self._firewall.unblock(ip)
+            if result.success:
+                ok += 1
+                async with self._state.lock:
+                    if ip in self._state.ip_records:
+                        self._state.ip_records[ip].is_blocked = False
+                    self._state.blocked_ips.discard(ip)
+            else:
+                fail += 1
+        msg = f"Liberados: {ok}"
+        if fail:
+            msg += f" | Erros: {fail}"
+        self.notify(msg, severity="information" if not fail else "error")
 
     async def action_clear_ip(self) -> None:
         ip = self._get_selected_ip()
@@ -331,17 +383,24 @@ class SiteManagerApp(App):
         self.notify(f"{ip} removido da lista")
 
     def action_show_help(self) -> None:
-        help_text = (
-            "[bold]Atalhos:[/]\n"
-            "  ↑/↓  Navegar entre IPs\n"
-            "  b    Bloquear IP selecionado\n"
-            "  u    Liberar IP bloqueado\n"
-            "  f    Filtrar apenas bots\n"
-            "  c    Remover IP da lista\n"
-            "  r    Re-consultar GeoIP\n"
-            "  q    Sair"
-        )
-        self.notify(help_text, title="Ajuda", timeout=8)
+        t = Text()
+        t.append("Atalhos:\n", style="bold")
+        lines = [
+            ("↑/↓", "Navegar entre IPs"),
+            ("b",   "Bloquear IP selecionado"),
+            ("u",   "Liberar IP selecionado"),
+            ("U",   "Liberar TODOS os IPs bloqueados"),
+            ("e",   "Mostrar apenas bloqueados"),
+            ("f",   "Mostrar apenas bots"),
+            ("a",   "Mostrar todos (limpar filtro)"),
+            ("c",   "Remover IP da lista"),
+            ("r",   "Re-consultar GeoIP"),
+            ("q",   "Sair"),
+        ]
+        for key, desc in lines:
+            t.append(f"  {key:<4}", style="bold cyan")
+            t.append(f" {desc}\n")
+        self.notify(t, title="Ajuda", timeout=10)
 
     async def action_refresh_geo(self) -> None:
         ip = self._get_selected_ip()

@@ -215,9 +215,24 @@ def main() -> None:
             finally:
                 demo_task.cancel()
         else:
-            from monitor import tail_log, replay_log
+            from monitor import tail_log, replay_log, IPRecord, enrich_async
 
             async def start_monitor():
+                from datetime import timezone as tz
+
+                # Create stub records for IPs blocked in previous sessions
+                stub_time = datetime.now(tz=tz.utc)
+                for ip in list(state.blocked_ips):
+                    async with state.lock:
+                        if ip not in state.ip_records:
+                            state.ip_records[ip] = IPRecord(
+                                ip=ip,
+                                first_seen=stub_time,
+                                last_seen=stub_time,
+                                is_blocked=True,
+                            )
+                    asyncio.create_task(enrich_async(ip, state, geo, detector))
+
                 # Pre-populate with recent log entries
                 await replay_log(args.log_file, state, geo, detector, lines=args.replay_lines)
                 # Then start tailing in real-time
