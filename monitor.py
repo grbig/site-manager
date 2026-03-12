@@ -4,6 +4,7 @@ monitor.py — Nginx log tailer, parser, and IP state management.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 from collections import deque
@@ -26,6 +27,9 @@ COMBINED_LOG_RE = re.compile(
 )
 
 TIME_FORMAT = "%d/%b/%Y:%H:%M:%S %z"
+
+# Regex to split "METHOD /path PROTO" from the request field in JSON logs
+REQUEST_RE = re.compile(r'^(\S+)\s+(\S+)\s+(\S+)$')
 
 # Max timestamps kept per IP (60s window at up to 1000 req/s = 60000 entries)
 MAX_TIMESTAMPS = 60_000
@@ -80,8 +84,63 @@ class IPRecord:
 
 
 def parse_line(raw: str) -> LogEntry | None:
-    """Parse a single Nginx combined log line. Returns None on failure."""
-    m = COMBINED_LOG_RE.match(raw.strip())
+    """Parse a single Nginx log line. Auto-detects JSON or combined format."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    if raw.startswith("{"):
+        return _parse_json(raw)
+    return _parse_combined(raw)
+
+
+def _parse_json(raw: str) -> LogEntry | None:
+    """Parse a JSON-format Nginx log line."""
+    try:
+        d = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+    # Extract IP — prefer http_x_forwarded_for if present (real IP behind proxy)
+    ip = d.get("http_x_forwarded_for", "") or d.get("remote_addr", "")
+    if not ip or ip == "-":
+        ip = d.get("remote_addr", "")
+    # x_forwarded_for may be a comma-separated list; take first
+    if "," in ip:
+        ip = ip.split(",")[0].strip()
+    if not ip:
+        return None
+
+    # Parse "METHOD /path PROTO" request field
+    request = d.get("request", "")
+    m = REQUEST_RE.match(request)
+    if m:
+        method, path, protocol = m.group(1), m.group(2), m.group(3)
+    else:
+        method, path, protocol = "-", request or "-", "-"
+
+    # Timestamp
+    ts_str = d.get("timestamp", "")
+    try:
+        timestamp = datetime.fromisoformat(ts_str)
+    except (ValueError, TypeError):
+        timestamp = datetime.now().astimezone()
+
+    return LogEntry(
+        ip=ip,
+        timestamp=timestamp,
+        method=method,
+        path=path,
+        protocol=protocol,
+        status=int(d.get("status", 0)),
+        bytes_sent=int(d.get("body_bytes_sent", 0) or 0),
+        referer=d.get("http_referrer", "") or "",
+        user_agent=d.get("http_user_agent", "") or "",
+    )
+
+
+def _parse_combined(raw: str) -> LogEntry | None:
+    """Parse a standard Nginx combined log format line."""
+    m = COMBINED_LOG_RE.match(raw)
     if not m:
         return None
     try:
