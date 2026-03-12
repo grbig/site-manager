@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from rich.markup import escape as markup_escape
+from rich.text import Text
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -49,33 +49,44 @@ class DetailPanel(Static):
         yield Static("── Selecione um IP na tabela ──", id="detail-content")
 
     def update_record(self, record: "IPRecord | None") -> None:
-        """Update the panel by mutating the inner Static's renderable."""
+        """Update the panel using rich.text.Text — no markup parsing, safe for any characters."""
         content = self.query_one("#detail-content", Static)
         if record is None:
-            content.update("── Selecione um IP na tabela ──")
+            content.update(Text("── Selecione um IP na tabela ──"))
             return
 
         rate = record.requests_per_minute()
-        bot_text = f"Sim — {markup_escape(record.bot_reason)}" if record.is_bot else "Não"
-        blocked_text = "[red]Sim[/]" if record.is_blocked else "Não"
-        uas = [markup_escape(ua) for ua in list(record.user_agents)[:3]]
-        ua_lines = ("\n" + " " * 16).join(uas) if uas else "(nenhum)"
         first_seen = record.first_seen.strftime("%d/%m %H:%M:%S") if record.first_seen else "-"
         last_seen = record.last_seen.strftime("%d/%m %H:%M:%S") if record.last_seen else "-"
-        safe_path = markup_escape(record.last_path or "-")
-        safe_country = markup_escape(record.country_name or "...")
+        path = record.last_path or "-"
+        country = record.country_name or "..."
 
-        text = (
-            f"[bold cyan]── {record.ip} ──[/]\n"
-            f"  País        : {record.flag_emoji} {safe_country} ({record.country_code})\n"
-            f"  Bot         : {bot_text}\n"
-            f"  Bloqueado   : {blocked_text}\n"
-            f"  Requisições : {record.request_count} total, {rate}/min\n"
-            f"  Primeiro    : {first_seen}  Último: {last_seen}\n"
-            f"  Último Req  : {record.last_method} {safe_path} → {record.last_status}\n"
-            f"  User Agents : {ua_lines}"
-        )
-        content.update(text)
+        t = Text()
+        t.append(f"── {record.ip} ──\n", style="bold cyan")
+        t.append(f"  País        : {record.flag_emoji} {country} ({record.country_code})\n")
+        if record.is_bot:
+            t.append("  Bot         : Sim — ", style="")
+            t.append(record.bot_reason + "\n", style="yellow")
+        else:
+            t.append("  Bot         : Não\n")
+        if record.is_blocked:
+            t.append("  Bloqueado   : ")
+            t.append("Sim\n", style="bold red")
+        else:
+            t.append("  Bloqueado   : Não\n")
+        t.append(f"  Requisições : {record.request_count} total, {rate}/min\n")
+        t.append(f"  Primeiro    : {first_seen}  Último: {last_seen}\n")
+        t.append(f"  Último Req  : {record.last_method} {path} → {record.last_status}\n")
+        t.append("  User Agents : ")
+        uas = list(record.user_agents)[:3]
+        if uas:
+            t.append(uas[0] + "\n", style="dim")
+            for ua in uas[1:]:
+                t.append(" " * 16 + ua + "\n", style="dim")
+        else:
+            t.append("(nenhum)\n")
+
+        content.update(t)
 
 
 # ─────────────────────────────────────────────────────────────── #
