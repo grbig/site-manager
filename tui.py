@@ -8,8 +8,7 @@ from typing import TYPE_CHECKING
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.color import Color
-from textual.containers import Horizontal, Vertical
+from textual.containers import Vertical
 from textual.widgets import (
     DataTable,
     Footer,
@@ -34,54 +33,45 @@ class DetailPanel(Static):
 
     DEFAULT_CSS = """
     DetailPanel {
-        height: 14;
+        height: 11;
         border: solid $primary;
         padding: 0 1;
         background: $surface;
     }
-    DetailPanel .detail-title {
-        color: $accent;
-        text-style: bold;
-    }
-    DetailPanel .detail-row {
-        height: 1;
-    }
     """
 
+    # Use a single Static child whose content is updated in place — avoids
+    # the DuplicateIds error that occurs when remove_children() + mount()
+    # are called faster than Textual processes the removal from its registry.
     def compose(self) -> ComposeResult:
-        yield Label("── Selecione um IP na tabela ──", id="detail-placeholder")
+        yield Static("── Selecione um IP na tabela ──", id="detail-content")
 
     def update_record(self, record: "IPRecord | None") -> None:
-        """Update the panel with the given IPRecord."""
-        self.remove_children()
+        """Update the panel by mutating the inner Static's renderable."""
+        content = self.query_one("#detail-content", Static)
         if record is None:
-            self.mount(Label("── Selecione um IP na tabela ──", id="detail-placeholder"))
+            content.update("── Selecione um IP na tabela ──")
             return
 
-        now = datetime.now().timestamp()
         rate = record.requests_per_minute()
-
         bot_text = f"Sim — {record.bot_reason}" if record.is_bot else "Não"
-        blocked_text = "Sim" if record.is_blocked else "Não"
-
-        uas = list(record.user_agents)[:4]
-        ua_lines = "\n          ".join(uas) if uas else "(nenhum)"
-
+        blocked_text = "[red]Sim[/]" if record.is_blocked else "Não"
+        uas = list(record.user_agents)[:3]
+        ua_lines = ("\n" + " " * 15).join(uas) if uas else "(nenhum)"
         first_seen = record.first_seen.strftime("%d/%m %H:%M:%S") if record.first_seen else "-"
         last_seen = record.last_seen.strftime("%d/%m %H:%M:%S") if record.last_seen else "-"
 
-        lines = [
-            f"[bold cyan]── Detalhes: {record.ip} ──[/]",
-            f"  País       : {record.flag_emoji} {record.country_name} ({record.country_code})",
-            f"  Bot        : {bot_text}",
-            f"  Bloqueado  : {blocked_text}",
-            f"  Requisições: {record.request_count} total, {rate}/min",
-            f"  Primeiro   : {first_seen}",
-            f"  Último     : {last_seen}",
-            f"  Último Req : {record.last_method} {record.last_path} → {record.last_status}",
-            f"  User Agents: {ua_lines}",
-        ]
-        self.mount(Static("\n".join(lines)))
+        text = (
+            f"[bold cyan]── {record.ip} ──[/]\n"
+            f"  País        : {record.flag_emoji} {record.country_name} ({record.country_code})\n"
+            f"  Bot         : {bot_text}\n"
+            f"  Bloqueado   : {blocked_text}\n"
+            f"  Requisições : {record.request_count} total, {rate}/min\n"
+            f"  Primeiro    : {first_seen}  Último: {last_seen}\n"
+            f"  Último Req  : {record.last_method} {record.last_path} → {record.last_status}\n"
+            f"  User Agents : {ua_lines}"
+        )
+        content.update(text)
 
 
 # ─────────────────────────────────────────────────────────────── #
